@@ -11,6 +11,7 @@ import {
   json,
   jsonb,
   pgEnum,
+  pgPolicy,
   pgTable,
   text,
   timestamp,
@@ -289,23 +290,23 @@ export const workflowExecutionLogs = pgTable(
   'workflow_execution_logs',
   {
     id: text('id').primaryKey(),
-    workflowId: text('workflow_id')
-      .notNull()
-      .references(() => workflow.id, { onDelete: 'cascade' }),
+    /** Nullable for standalone block executions (Canvas integration). */
+    workflowId: text('workflow_id').references(() => workflow.id, { onDelete: 'cascade' }),
     workspaceId: text('workspace_id')
       .notNull()
       .references(() => workspace.id, { onDelete: 'cascade' }),
     executionId: text('execution_id').notNull(),
-    stateSnapshotId: text('state_snapshot_id')
-      .notNull()
-      .references(() => workflowExecutionSnapshots.id),
+    /** Nullable for standalone block executions (Canvas integration). */
+    stateSnapshotId: text('state_snapshot_id').references(() => workflowExecutionSnapshots.id),
     deploymentVersionId: text('deployment_version_id').references(
       () => workflowDeploymentVersion.id,
       { onDelete: 'set null' }
     ),
 
-    level: text('level').notNull(), // 'info', 'error'
-    trigger: text('trigger').notNull(), // 'api', 'webhook', 'schedule', 'manual', 'chat'
+    /** Execution log level. */
+    level: text('level').notNull(),
+    /** Execution trigger source. */
+    trigger: text('trigger').notNull(),
 
     startedAt: timestamp('started_at').notNull(),
     endedAt: timestamp('ended_at'),
@@ -315,6 +316,17 @@ export const workflowExecutionLogs = pgTable(
     cost: jsonb('cost'),
     files: jsonb('files'), // File metadata for execution files
     createdAt: timestamp('created_at').notNull().defaultNow(),
+
+    /** Canvas integration: block execution context. */
+    blockType: text('block_type'),
+    blockVersion: text('block_version'),
+    callerId: text('caller_id'),
+    callerUserId: text('caller_user_id'),
+    callerWorkspaceId: text('caller_workspace_id'),
+    callerWorkflowId: text('caller_workflow_id'),
+    callerNodeId: text('caller_node_id'),
+    apiCallsMade: integer('api_calls_made'),
+    creditsConsumed: decimal('credits_consumed'),
   },
   (table) => ({
     workflowIdIdx: index('workflow_execution_logs_workflow_id_idx').on(table.workflowId),
@@ -338,8 +350,14 @@ export const workflowExecutionLogs = pgTable(
       table.workspaceId,
       table.startedAt
     ),
+    callerIdx: index('workflow_execution_logs_caller_idx').on(table.callerId, table.callerUserId),
+    blockTypeIdx: index('workflow_execution_logs_block_type_idx').on(table.blockType),
+    serviceAccountPolicy: pgPolicy('Service accounts can manage execution logs', {
+      for: 'all',
+      using: sql`current_setting('request.headers', true)::json->>'x-service-key' IS NOT NULL`,
+    }),
   })
-)
+).enableRLS()
 
 export const pausedExecutions = pgTable(
   'paused_executions',
@@ -1715,3 +1733,41 @@ export const usageLog = pgTable(
     workflowIdIdx: index('usage_log_workflow_id_idx').on(table.workflowId),
   })
 )
+
+/**
+ * Service API Keys for service-to-service authentication.
+ * Unlike user API keys, these are not tied to a specific user and
+ * support scoped permissions for different services (e.g., Canvas).
+ */
+export const serviceApiKey = pgTable(
+  'service_api_keys',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    keyHash: text('key_hash').notNull(),
+    keyPrefix: text('key_prefix').notNull(),
+    serviceName: text('service_name').notNull(),
+    permissions: jsonb('permissions')
+      .notNull()
+      .default('["blocks:execute","users:provision"]'),
+    rateLimitPerMinute: integer('rate_limit_per_minute').default(1000),
+    rateLimitPerDay: integer('rate_limit_per_day').default(100000),
+    isActive: boolean('is_active').notNull().default(true),
+    expiresAt: timestamp('expires_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    lastUsedAt: timestamp('last_used_at'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    createdByUserId: text('created_by_user_id').references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    metadata: jsonb('metadata').default('{}'),
+  },
+  (table) => ({
+    serviceActiveIdx: index('service_api_keys_service_active_idx').on(
+      table.serviceName,
+      table.isActive
+    ),
+    keyHashUnique: uniqueIndex('service_api_keys_key_hash_unique').on(table.keyHash),
+    keyPrefixIdx: index('service_api_keys_key_prefix_idx').on(table.keyPrefix),
+  })
+).enableRLS()

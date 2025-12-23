@@ -904,6 +904,13 @@
       "when": 1766275541149,
       "tag": "0129_stormy_nightmare",
       "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1766511365071,
+      "tag": "0130_canvas_integration",
+      "breakpoints": true
     }
   ]
 }

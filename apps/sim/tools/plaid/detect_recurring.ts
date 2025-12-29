@@ -10,24 +10,24 @@ export const plaidDetectRecurringTool: ToolConfig<DetectRecurringParams, DetectR
     version: '1.0.0',
 
     params: {
-      apiKey: {
-        type: 'string',
-        required: true,
-        visibility: 'user-only',
-        description: 'Plaid client ID',
-      },
-      apiSecret: {
-        type: 'string',
-        required: true,
-        visibility: 'user-only',
-        description: 'Plaid secret key',
-      },
-      accessToken: {
-        type: 'string',
-        required: true,
-        visibility: 'user-only',
-        description: 'Plaid access token for the item',
-      },
+    apiKey: {
+      type: 'string',
+      required: false,
+      visibility: 'user-only',
+      description: 'Plaid client ID (optional for local analysis)',
+    },
+    apiSecret: {
+      type: 'string',
+      required: false,
+      visibility: 'user-only',
+      description: 'Plaid secret key (optional for local analysis)',
+    },
+    accessToken: {
+      type: 'string',
+      required: false,
+      visibility: 'user-only',
+      description: 'Plaid access token for the item (optional for local analysis)',
+    },
       transactions: {
         type: 'json',
         required: true,
@@ -54,103 +54,108 @@ export const plaidDetectRecurringTool: ToolConfig<DetectRecurringParams, DetectR
       },
     },
 
-    request: {
-      url: () => 'https://production.plaid.com/transactions/recurring/get',
-      method: 'POST',
-      headers: (params) => ({
-        'Content-Type': 'application/json',
-      }),
-      body: (params) => {
-        return { body: JSON.stringify({}) }
-      },
-    },
-
-    transformResponse: async (response, params) => {
-      if (!params) {
-        throw new Error('Params are required for transformResponse')
-      }
-      
-      const transactions = params.transactions as any[]
-      const minOccurrences = params.minOccurrences || 2
-      const toleranceDays = params.toleranceDays || 3
-      const amountTolerance = params.amountTolerance || 0.05
-
-      const merchantGroups = new Map<string, any[]>()
-
-      transactions.forEach((tx) => {
-        const merchant = tx.merchant_name || tx.name || 'Unknown'
-        if (!merchantGroups.has(merchant)) {
-          merchantGroups.set(merchant, [])
-        }
-        merchantGroups.get(merchant)!.push(tx)
-      })
-
-      const recurringSubscriptions: any[] = []
-
-      merchantGroups.forEach((txs, merchant) => {
-        if (txs.length < minOccurrences) return
-
-        txs.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-
-        const intervals: number[] = []
-        for (let i = 1; i < txs.length; i++) {
-          const daysDiff = Math.abs(
-            (new Date(txs[i].date).getTime() - new Date(txs[i - 1].date).getTime()) /
-              (1000 * 60 * 60 * 24)
-          )
-          intervals.push(daysDiff)
+    directExecution: async (params) => {
+      try {
+        if (!Array.isArray(params.transactions)) {
+          return {
+            success: false,
+            output: {},
+            error: 'PLAID_VALIDATION_ERROR: transactions must be an array',
+          }
         }
 
-        const avgInterval = intervals.reduce((sum, i) => sum + i, 0) / intervals.length
-        const isConsistent = intervals.every((i) => Math.abs(i - avgInterval) <= toleranceDays)
+        const transactions = params.transactions as any[]
+        const minOccurrences = params.minOccurrences || 2
+        const toleranceDays = params.toleranceDays || 3
+        const amountTolerance = params.amountTolerance || 0.05
 
-        const avgAmount = txs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0) / txs.length
-        const amountConsistent = txs.every(
-          (tx) => Math.abs(Math.abs(tx.amount) - avgAmount) / avgAmount <= amountTolerance
-        )
+        const merchantGroups = new Map<string, any[]>()
 
-        if (isConsistent && amountConsistent) {
-          const frequency =
-            avgInterval <= 8
-              ? 'weekly'
-              : avgInterval <= 35
-                ? 'monthly'
-                : avgInterval <= 100
-                  ? 'quarterly'
-                  : 'yearly'
+        transactions.forEach((tx) => {
+          const merchant = tx.merchant_name || tx.name || 'Unknown'
+          if (!merchantGroups.has(merchant)) {
+            merchantGroups.set(merchant, [])
+          }
+          merchantGroups.get(merchant)!.push(tx)
+        })
 
-          recurringSubscriptions.push({
-            merchant_name: merchant,
-            frequency,
-            avg_interval_days: Math.round(avgInterval),
-            avg_amount: avgAmount,
-            occurrences: txs.length,
-            first_transaction: txs[0].date,
-            last_transaction: txs[txs.length - 1].date,
-            next_predicted_date: new Date(
-              new Date(txs[txs.length - 1].date).getTime() + avgInterval * 24 * 60 * 60 * 1000
+        const recurringSubscriptions: any[] = []
+
+        merchantGroups.forEach((txs, merchant) => {
+          if (txs.length < minOccurrences) return
+
+          txs.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+
+          const intervals: number[] = []
+          for (let i = 1; i < txs.length; i++) {
+            const daysDiff = Math.abs(
+              (new Date(txs[i].date).getTime() - new Date(txs[i - 1].date).getTime()) /
+                (1000 * 60 * 60 * 24)
             )
-              .toISOString()
-              .split('T')[0],
-            confidence: isConsistent && amountConsistent ? 0.9 : 0.7,
-            transaction_ids: txs.map((tx) => tx.transaction_id),
-          })
-        }
-      })
+            intervals.push(daysDiff)
+          }
 
-      return {
-        success: true,
-        output: {
-          recurring_subscriptions: recurringSubscriptions,
-          metadata: {
-            total_subscriptions_found: recurringSubscriptions.length,
-            total_transactions_analyzed: transactions.length,
-            date_range: {
-              from: transactions[0]?.date,
-              to: transactions[transactions.length - 1]?.date,
+          if (intervals.length === 0) return
+
+          const avgInterval = intervals.reduce((sum, i) => sum + i, 0) / intervals.length
+          const isConsistent = intervals.every((i) => Math.abs(i - avgInterval) <= toleranceDays)
+
+          const avgAmount = txs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0) / txs.length
+          const amountConsistent = txs.every(
+            (tx) => Math.abs(Math.abs(tx.amount) - avgAmount) / avgAmount <= amountTolerance
+          )
+
+          if (isConsistent && amountConsistent) {
+            const frequency =
+              avgInterval <= 8
+                ? 'weekly'
+                : avgInterval <= 35
+                  ? 'monthly'
+                  : avgInterval <= 100
+                    ? 'quarterly'
+                    : 'yearly'
+
+            recurringSubscriptions.push({
+              merchant_name: merchant,
+              frequency,
+              avg_interval_days: Math.round(avgInterval),
+              avg_amount: avgAmount,
+              occurrences: txs.length,
+              first_transaction: txs[0].date,
+              last_transaction: txs[txs.length - 1].date,
+              next_predicted_date: new Date(
+                new Date(txs[txs.length - 1].date).getTime() + avgInterval * 24 * 60 * 60 * 1000
+              )
+                .toISOString()
+                .split('T')[0],
+              confidence: isConsistent && amountConsistent ? 0.9 : 0.7,
+              transaction_ids: txs.map((tx) => tx.transaction_id),
+            })
+          }
+        })
+
+        return {
+          success: true,
+          output: {
+            recurring_subscriptions: recurringSubscriptions,
+            metadata: {
+              total_subscriptions_found: recurringSubscriptions.length,
+              total_transactions_analyzed: transactions.length,
+              date_range: {
+                from: transactions[0]?.date,
+                to: transactions[transactions.length - 1]?.date,
+              },
             },
           },
-        },
+        }
+      } catch (error: any) {
+        return {
+          success: false,
+          output: {},
+          error: `PLAID_RECURRING_ERROR: Failed to detect recurring transactions - ${
+            error.message || 'Unknown error'
+          }`,
+        }
       }
     },
 

@@ -1,8 +1,10 @@
+import Stripe from 'stripe'
 import type {
   CreateRecurringInvoiceParams,
   CreateRecurringInvoiceResponse,
 } from '@/tools/stripe/types'
 import type { ToolConfig } from '@/tools/types'
+import { validateFinancialAmount } from '@/tools/financial-validation'
 
 export const stripeCreateRecurringInvoiceTool: ToolConfig<
   CreateRecurringInvoiceParams,
@@ -71,108 +73,164 @@ export const stripeCreateRecurringInvoiceTool: ToolConfig<
     },
   },
 
-  request: {
-    url: () => 'https://api.stripe.com/v1/invoices',
-    method: 'POST',
-    headers: (params) => ({
-      Authorization: `Bearer ${params.apiKey}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    }),
-    body: (params) => {
-      const formData = new URLSearchParams()
-      formData.append('customer', params.customer)
-      formData.append('auto_advance', String(params.autoAdvance ?? true))
+  /**
+   * SDK-based execution using stripe SDK
+   * Creates a recurring subscription so Stripe handles ongoing invoices
+   */
+  directExecution: async (params) => {
+    try {
+      const amountValidation = validateFinancialAmount(params.amount, {
+        fieldName: 'amount',
+        allowNegative: false,
+        allowZero: false,
+        min: 0.01,
+      })
 
-      if (params.description) {
-        formData.append('description', params.description)
+      if (!amountValidation.valid) {
+        return {
+          success: false,
+          output: {},
+          error: `STRIPE_VALIDATION_ERROR: ${amountValidation.error}`,
+        }
       }
 
-      if (params.daysUntilDue) {
-        formData.append('days_until_due', params.daysUntilDue.toString())
+      const interval = params.interval
+      const allowedIntervals = new Set(['day', 'week', 'month', 'year'])
+      if (!allowedIntervals.has(interval)) {
+        return {
+          success: false,
+          output: {},
+          error: 'STRIPE_VALIDATION_ERROR: interval must be day, week, month, or year',
+        }
       }
 
-      // Add invoice item
-      const amountCents = Math.round(params.amount * 100)
-      formData.append('lines[0][amount]', amountCents.toString())
-      formData.append('lines[0][currency]', params.currency || 'usd')
-      formData.append(
-        'lines[0][description]',
-        params.description || `Recurring ${params.interval}ly invoice`
-      )
+      const intervalCount = params.intervalCount ?? 1
+      if (intervalCount < 1) {
+        return {
+          success: false,
+          output: {},
+          error: 'STRIPE_VALIDATION_ERROR: intervalCount must be at least 1',
+        }
+      }
 
-      // Add metadata for recurring tracking
-      formData.append('metadata[recurring]', 'true')
-      formData.append('metadata[interval]', params.interval)
-      formData.append('metadata[interval_count]', String(params.intervalCount || 1))
+      const stripe = new Stripe(params.apiKey, {
+        apiVersion: '2025-08-27.basil',
+      })
 
-      return { body: formData.toString() }
-    },
-  },
+      const amountValue = amountValidation.sanitized ?? Number(params.amount)
+      const amountCents = Math.round(amountValue * 100)
+      const currency = params.currency || 'usd'
+      const collectionMethod = params.autoAdvance === false ? 'send_invoice' : 'charge_automatically'
 
-  transformResponse: async (response, params) => {
-    if (!params) {
-      throw new Error('Missing required parameters for recurring invoice')
-    }
-
-    const invoice = await response.json()
-
-    // Calculate next invoice date based on interval
-    const nextInvoiceDate = new Date()
-    const intervalCount = params.intervalCount || 1
-
-    switch (params.interval) {
-      case 'day':
-        nextInvoiceDate.setDate(nextInvoiceDate.getDate() + intervalCount)
-        break
-      case 'week':
-        nextInvoiceDate.setDate(nextInvoiceDate.getDate() + intervalCount * 7)
-        break
-      case 'month':
-        nextInvoiceDate.setMonth(nextInvoiceDate.getMonth() + intervalCount)
-        break
-      case 'year':
-        nextInvoiceDate.setFullYear(nextInvoiceDate.getFullYear() + intervalCount)
-        break
-    }
-
-    return {
-      success: true,
-      output: {
-        invoice: {
-          id: invoice.id,
-          customer: invoice.customer,
-          amount_due: invoice.amount_due / 100,
-          currency: invoice.currency,
-          status: invoice.status,
-          created: new Date(invoice.created * 1000).toISOString().split('T')[0],
-          due_date: invoice.due_date
-            ? new Date(invoice.due_date * 1000).toISOString().split('T')[0]
-            : null,
-          invoice_pdf: invoice.invoice_pdf || null,
-          hosted_invoice_url: invoice.hosted_invoice_url || null,
-        },
-        recurring_schedule: {
-          interval: params.interval,
-          interval_count: intervalCount,
-          next_invoice_date: nextInvoiceDate.toISOString().split('T')[0],
-          estimated_annual_value:
-            params.interval === 'month'
-              ? params.amount * 12 / intervalCount
-              : params.interval === 'year'
-                ? params.amount / intervalCount
-                : params.interval === 'week'
-                  ? params.amount * 52 / intervalCount
-                  : params.amount * 365 / intervalCount,
-        },
+      const subscription = await stripe.subscriptions.create({
+        customer: params.customer,
+        collection_method: collectionMethod,
+        days_until_due:
+          collectionMethod === 'send_invoice' ? (params.daysUntilDue ?? 30) : undefined,
+        items: [
+          {
+            price_data: {
+              currency,
+              recurring: {
+                interval,
+                interval_count: intervalCount,
+              },
+              unit_amount: amountCents,
+              product_data: {
+                name: params.description || `Recurring ${interval} invoice`,
+              },
+            },
+          },
+        ],
         metadata: {
-          invoice_id: invoice.id,
-          customer_id: invoice.customer,
-          amount: invoice.amount_due / 100,
-          status: invoice.status,
-          recurring: true,
-          interval: params.interval,
+          recurring: 'true',
+          interval,
+          interval_count: String(intervalCount),
         },
-      },
+        expand: ['latest_invoice'],
+      })
+
+      const latestInvoice =
+        subscription.latest_invoice && typeof subscription.latest_invoice !== 'string'
+          ? subscription.latest_invoice
+          : null
+      const invoiceId =
+        latestInvoice?.id ||
+        (typeof subscription.latest_invoice === 'string' ? subscription.latest_invoice : '')
+
+      const invoiceCreated = latestInvoice?.created
+        ? new Date(latestInvoice.created * 1000).toISOString().split('T')[0]
+        : new Date().toISOString().split('T')[0]
+
+      const nextInvoiceDate = subscription.current_period_end
+        ? new Date(subscription.current_period_end * 1000)
+        : (() => {
+            const next = new Date()
+            switch (interval) {
+              case 'day':
+                next.setDate(next.getDate() + intervalCount)
+                break
+              case 'week':
+                next.setDate(next.getDate() + intervalCount * 7)
+                break
+              case 'month':
+                next.setMonth(next.getMonth() + intervalCount)
+                break
+              case 'year':
+                next.setFullYear(next.getFullYear() + intervalCount)
+                break
+            }
+            return next
+          })()
+
+      return {
+        success: true,
+        output: {
+          invoice: {
+            id: invoiceId,
+            customer: subscription.customer as string,
+            amount_due: latestInvoice ? latestInvoice.amount_due / 100 : amountValue,
+            currency,
+            status: latestInvoice?.status || 'draft',
+            created: invoiceCreated,
+            due_date: latestInvoice?.due_date
+              ? new Date(latestInvoice.due_date * 1000).toISOString().split('T')[0]
+              : null,
+            invoice_pdf: latestInvoice?.invoice_pdf || null,
+            hosted_invoice_url: latestInvoice?.hosted_invoice_url || null,
+          },
+          recurring_schedule: {
+            interval,
+            interval_count: intervalCount,
+            next_invoice_date: nextInvoiceDate.toISOString().split('T')[0],
+            estimated_annual_value:
+              interval === 'month'
+                ? (amountValue * 12) / intervalCount
+                : interval === 'year'
+                  ? amountValue / intervalCount
+                  : interval === 'week'
+                    ? (amountValue * 52) / intervalCount
+                    : (amountValue * 365) / intervalCount,
+          },
+          metadata: {
+            invoice_id: invoiceId,
+            customer_id: subscription.customer as string,
+            amount: latestInvoice ? latestInvoice.amount_due / 100 : amountValue,
+            status: latestInvoice?.status || 'draft',
+            recurring: true,
+            interval,
+          },
+        },
+      }
+    } catch (error: any) {
+      const errorDetails = error.response?.body
+        ? JSON.stringify(error.response.body)
+        : error.message || 'Unknown error'
+      return {
+        success: false,
+        output: {},
+        error: `STRIPE_RECURRING_INVOICE_ERROR: Failed to create recurring invoice - ${errorDetails}`,
+      }
     }
   },
 

@@ -431,9 +431,9 @@ export interface UpdateWebhookParams {
  * AI Categorization Types
  */
 export interface CategorizeTransactionsParams {
-  apiKey: string
-  apiSecret: string
-  accessToken: string
+  apiKey?: string
+  apiSecret?: string
+  accessToken?: string
   transactions: PlaidTransaction[]
   historicalCategories?: Array<{
     merchant: string
@@ -466,9 +466,9 @@ export interface CategorizeTransactionsResponse extends ToolResponse {
  * Recurring Transaction Detection Types
  */
 export interface DetectRecurringParams {
-  apiKey: string
-  apiSecret: string
-  accessToken: string
+  apiKey?: string
+  apiSecret?: string
+  accessToken?: string
   transactions: PlaidTransaction[]
   minOccurrences?: number
   toleranceDays?: number

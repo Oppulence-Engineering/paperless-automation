@@ -1268,6 +1268,11 @@ export async function refreshOAuthToken(
   try {
     const provider = getBaseProviderForService(providerId)
 
+    if (provider === 'plaid') {
+      logger.warn('Plaid does not support OAuth refresh tokens', { providerId })
+      return null
+    }
+
     const config = getProviderAuthConfig(provider)
 
     const { headers, bodyParams } = buildAuthRequest(config, refreshToken)

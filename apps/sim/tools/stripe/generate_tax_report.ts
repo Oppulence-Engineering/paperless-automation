@@ -7,6 +7,32 @@ import type { ToolConfig } from '@/tools/types'
  * Uses official stripe SDK to fetch charges then generates 1099-K tax reports
  */
 
+async function listAllCharges(
+  stripe: Stripe,
+  params: Stripe.ChargeListParams
+): Promise<Stripe.Charge[]> {
+  const charges: Stripe.Charge[] = []
+  let startingAfter: string | undefined
+
+  do {
+    const page = await stripe.charges.list({
+      ...params,
+      limit: 100,
+      starting_after: startingAfter,
+    })
+
+    charges.push(...page.data)
+
+    if (!page.has_more || page.data.length === 0) {
+      break
+    }
+
+    startingAfter = page.data[page.data.length - 1].id
+  } while (startingAfter)
+
+  return charges
+}
+
 export const stripeGenerateTaxReportTool: ToolConfig<
   GenerateTaxReportParams,
   GenerateTaxReportResponse
@@ -54,102 +80,99 @@ export const stripeGenerateTaxReportTool: ToolConfig<
       const startTimestamp = Math.floor(startDate.getTime() / 1000)
       const endTimestamp = Math.floor(endDate.getTime() / 1000)
 
-      const chargeList = await stripe.charges.list({
+      const charges = await listAllCharges(stripe, {
         created: {
           gte: startTimestamp,
           lte: endTimestamp,
         },
-        limit: 100,
       })
-
-      const charges = chargeList.data
 
       const reportType = params.reportType || '1099-K'
 
-    let totalGrossPayments = 0
-    let totalRefunds = 0
-    let totalNetPayments = 0
-    let transactionCount = 0
-    const monthlyBreakdown: any[] = []
-    const paymentMethodBreakdown: Record<string, number> = {}
+      let totalGrossPayments = 0
+      let totalRefunds = 0
+      let totalNetPayments = 0
+      let transactionCount = 0
+      const monthlyBreakdown: any[] = []
+      const paymentMethodBreakdown: Record<string, number> = {}
 
-    // Initialize monthly breakdown
-    for (let month = 1; month <= 12; month++) {
-      monthlyBreakdown.push({
-        month,
-        month_name: new Date(params.taxYear, month - 1).toLocaleString('default', {
-          month: 'long',
-        }),
-        gross_payments: 0,
-        refunds: 0,
-        net_payments: 0,
-        transaction_count: 0,
-      })
-    }
-
-    charges.forEach((charge: any) => {
-      if (charge.status === 'succeeded') {
-        const amount = charge.amount / 100
-        const chargeDate = new Date(charge.created * 1000)
-        const month = chargeDate.getMonth()
-
-        totalGrossPayments += amount
-        transactionCount++
-        monthlyBreakdown[month].gross_payments += amount
-        monthlyBreakdown[month].transaction_count++
-
-        // Track payment methods
-        const paymentMethod = charge.payment_method_details?.type || 'unknown'
-        paymentMethodBreakdown[paymentMethod] =
-          (paymentMethodBreakdown[paymentMethod] || 0) + amount
-
-        // Track refunds
-        if (charge.amount_refunded > 0) {
-          const refundAmount = charge.amount_refunded / 100
-          totalRefunds += refundAmount
-          monthlyBreakdown[month].refunds += refundAmount
-        }
+      // Initialize monthly breakdown
+      for (let month = 1; month <= 12; month++) {
+        monthlyBreakdown.push({
+          month,
+          month_name: new Date(params.taxYear, month - 1).toLocaleString('default', {
+            month: 'long',
+          }),
+          gross_payments: 0,
+          refunds: 0,
+          net_payments: 0,
+          transaction_count: 0,
+        })
       }
-    })
 
-    totalNetPayments = totalGrossPayments - totalRefunds
+      charges.forEach((charge) => {
+        if (charge.status === 'succeeded') {
+          const amount = charge.amount / 100
+          const chargeDate = new Date(charge.created * 1000)
+          const month = chargeDate.getMonth()
 
-    // Calculate net for each month
-    monthlyBreakdown.forEach((month) => {
-      month.net_payments = month.gross_payments - month.refunds
-    })
+          totalGrossPayments += amount
+          transactionCount++
+          monthlyBreakdown[month].gross_payments += amount
+          monthlyBreakdown[month].transaction_count++
 
-    // Determine 1099-K filing requirement (threshold is $600 for 2024+)
-    const requires1099K = totalGrossPayments >= 600
+          // Track payment methods
+          const paymentMethod = charge.payment_method_details?.type || 'unknown'
+          paymentMethodBreakdown[paymentMethod] =
+            (paymentMethodBreakdown[paymentMethod] || 0) + amount
+
+          // Track refunds
+          if (charge.amount_refunded > 0) {
+            const refundAmount = charge.amount_refunded / 100
+            totalRefunds += refundAmount
+            monthlyBreakdown[month].refunds += refundAmount
+          }
+        }
+      })
+
+      totalNetPayments = totalGrossPayments - totalRefunds
+
+      // Calculate net for each month
+      monthlyBreakdown.forEach((month) => {
+        month.net_payments = month.gross_payments - month.refunds
+      })
+
+      // Determine 1099-K filing requirement (threshold is $600 for 2024+)
+      const requires1099K = totalGrossPayments >= 600
 
       return {
         success: true,
         output: {
-        tax_summary: {
-          tax_year: params.taxYear,
-          total_gross_payments: totalGrossPayments,
-          total_refunds: totalRefunds,
-          total_net_payments: totalNetPayments,
-          total_transactions: transactionCount,
-          requires_1099k: requires1099K,
-          threshold_amount: 600,
-          filing_deadline: `March 31, ${params.taxYear + 1}`,
+          tax_summary: {
+            tax_year: params.taxYear,
+            total_gross_payments: totalGrossPayments,
+            total_refunds: totalRefunds,
+            total_net_payments: totalNetPayments,
+            total_transactions: transactionCount,
+            requires_1099k: requires1099K,
+            threshold_amount: 600,
+            filing_deadline: `March 31, ${params.taxYear + 1}`,
+          },
+          monthly_breakdown: monthlyBreakdown,
+          payment_method_breakdown: Object.entries(paymentMethodBreakdown).map(([type, amount]) => ({
+            payment_type: type,
+            total_amount: amount,
+            percentage: totalGrossPayments > 0 ? (amount / totalGrossPayments) * 100 : 0,
+          })),
+          metadata: {
+            tax_year: params.taxYear,
+            report_type: reportType,
+            requires_1099k: requires1099K,
+            total_gross_payments: totalGrossPayments,
+            total_net_payments: totalNetPayments,
+          },
         },
-        monthly_breakdown: monthlyBreakdown,
-        payment_method_breakdown: Object.entries(paymentMethodBreakdown).map(([type, amount]) => ({
-          payment_type: type,
-          total_amount: amount,
-          percentage: (amount / totalGrossPayments) * 100,
-        })),
-        metadata: {
-          tax_year: params.taxYear,
-          report_type: reportType,
-          requires_1099k: requires1099K,
-          total_gross_payments: totalGrossPayments,
-          total_net_payments: totalNetPayments,
-        },
-      },
-    }
+      }
     } catch (error: any) {
       const errorDetails = error.response?.body
         ? JSON.stringify(error.response.body)

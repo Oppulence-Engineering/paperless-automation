@@ -27,6 +27,8 @@ const ALLOWED_ENTITIES = [
   'Term',
 ] as const
 
+const ALLOWED_ENTITIES_LOWER = new Set(ALLOWED_ENTITIES.map((entity) => entity.toLowerCase()))
+
 /**
  * Dangerous keywords that should never appear in QuickBooks queries
  * These are not part of QBL but we block them defensively
@@ -117,11 +119,10 @@ export function validateQuickBooksQuery(query: string, expectedEntity: string): 
 
   // Normalize entity name for case-insensitive comparison
   const entityInQuery = fromMatch[1]
-  const normalizedEntity =
-    entityInQuery.charAt(0).toUpperCase() + entityInQuery.slice(1).toLowerCase()
+  const normalizedEntity = entityInQuery.toLowerCase()
 
   // Verify entity is in allowlist (case-insensitive)
-  if (!ALLOWED_ENTITIES.includes(normalizedEntity as any)) {
+  if (!ALLOWED_ENTITIES_LOWER.has(normalizedEntity)) {
     logger.warn(`Blocked query with unauthorized entity: ${entityInQuery}`, {
       query: trimmedQuery,
     })
@@ -129,7 +130,7 @@ export function validateQuickBooksQuery(query: string, expectedEntity: string): 
   }
 
   // Verify entity matches expected entity for this tool (case-insensitive)
-  if (normalizedEntity !== expectedEntity) {
+  if (normalizedEntity !== expectedEntity.toLowerCase()) {
     throw new Error(
       `Query entity '${entityInQuery}' does not match expected entity '${expectedEntity}'`
     )

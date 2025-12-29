@@ -3,6 +3,21 @@
  */
 import { env, getEnv, isTruthy } from './env'
 
+const isServer = typeof window === 'undefined'
+
+const getServerEnv = <T>(
+  getter: () => T,
+  clientVariable?: string
+): T | string | boolean | number | undefined => {
+  if (isServer) {
+    return getter()
+  }
+  if (clientVariable) {
+    return getEnv(clientVariable)
+  }
+  return undefined
+}
+
 /**
  * Is the application running in production mode
  */
@@ -28,20 +43,26 @@ export const isHosted =
 /**
  * Is billing enforcement enabled
  */
-export const isBillingEnabled = isTruthy(env.BILLING_ENABLED)
+export const isBillingEnabled = isTruthy(
+  getServerEnv(() => env.BILLING_ENABLED, 'NEXT_PUBLIC_BILLING_ENABLED')
+)
 
 /**
  * Is email verification enabled
  */
-export const isEmailVerificationEnabled = isTruthy(env.EMAIL_VERIFICATION_ENABLED)
+export const isEmailVerificationEnabled = isTruthy(
+  getServerEnv(() => env.EMAIL_VERIFICATION_ENABLED)
+)
+
+const isAuthDisabledRaw = isTruthy(getServerEnv(() => env.DISABLE_AUTH))
 
 /**
  * Is authentication disabled (for self-hosted deployments behind private networks)
  * This flag is blocked when isHosted is true.
  */
-export const isAuthDisabled = isTruthy(env.DISABLE_AUTH) && !isHosted
+export const isAuthDisabled = isAuthDisabledRaw && !isHosted
 
-if (isTruthy(env.DISABLE_AUTH)) {
+if (isAuthDisabledRaw) {
   import('@sim/logger')
     .then(({ createLogger }) => {
       const logger = createLogger('FeatureFlags')
@@ -63,26 +84,40 @@ if (isTruthy(env.DISABLE_AUTH)) {
 /**
  * Is user registration disabled
  */
-export const isRegistrationDisabled = isTruthy(env.DISABLE_REGISTRATION)
+export const isRegistrationDisabled = isTruthy(getServerEnv(() => env.DISABLE_REGISTRATION))
 
 /**
  * Is Trigger.dev enabled for async job processing
  */
-export const isTriggerDevEnabled = isTruthy(env.TRIGGER_DEV_ENABLED)
+export const isTriggerDevEnabled = isTruthy(
+  getServerEnv(() => env.TRIGGER_DEV_ENABLED, 'NEXT_PUBLIC_TRIGGER_DEV_ENABLED')
+)
 
 /**
  * Is SSO enabled for enterprise authentication
  */
-export const isSsoEnabled = isTruthy(env.SSO_ENABLED)
+export const isSsoEnabled = isTruthy(getServerEnv(() => env.SSO_ENABLED, 'NEXT_PUBLIC_SSO_ENABLED'))
 
 /**
  * Is E2B enabled for remote code execution
  */
-export const isE2bEnabled = isTruthy(env.E2B_ENABLED)
+export const isE2bEnabled = isTruthy(getServerEnv(() => env.E2B_ENABLED, 'NEXT_PUBLIC_E2B_ENABLED'))
 
 /**
  * Get cost multiplier based on environment
  */
 export function getCostMultiplier(): number {
-  return isProd ? (env.COST_MULTIPLIER ?? 1) : 1
+  if (!isProd) {
+    return 1
+  }
+
+  const multiplier = getServerEnv(() => env.COST_MULTIPLIER)
+  if (typeof multiplier === 'number') {
+    return multiplier
+  }
+  if (typeof multiplier === 'string' && multiplier.trim() !== '') {
+    const parsed = Number(multiplier)
+    return Number.isFinite(parsed) ? parsed : 1
+  }
+  return 1
 }

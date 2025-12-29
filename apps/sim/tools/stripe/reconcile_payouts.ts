@@ -11,6 +11,32 @@ const logger = createLogger('StripeReconcilePayouts')
  * Uses official stripe SDK to fetch payouts then matches to bank transactions
  */
 
+async function listAllPayouts(
+  stripe: Stripe,
+  params: Stripe.PayoutListParams
+): Promise<Stripe.Payout[]> {
+  const payouts: Stripe.Payout[] = []
+  let startingAfter: string | undefined
+
+  do {
+    const page = await stripe.payouts.list({
+      ...params,
+      limit: 100,
+      starting_after: startingAfter,
+    })
+
+    payouts.push(...page.data)
+
+    if (!page.has_more || page.data.length === 0) {
+      break
+    }
+
+    startingAfter = page.data[page.data.length - 1].id
+  } while (startingAfter)
+
+  return payouts
+}
+
 export const stripeReconcilePayoutsTool: ToolConfig<
   ReconcilePayoutsParams,
   ReconcilePayoutsResponse
@@ -116,90 +142,102 @@ export const stripeReconcilePayoutsTool: ToolConfig<
       const startTimestamp = Math.floor(startDate.getTime() / 1000)
       const endTimestamp = Math.floor(endDate.getTime() / 1000)
 
-      const payoutList = await stripe.payouts.list({
+      const payouts = await listAllPayouts(stripe, {
         created: {
           gte: startTimestamp,
           lte: endTimestamp,
         },
-        limit: 100,
       })
 
-      const payouts = payoutList.data
-      const bankTransactions = (params.bankTransactions as any[]) || []
+      const bankTransactions = Array.isArray(params.bankTransactions)
+        ? (params.bankTransactions as any[])
+        : []
       const amountTolerance = params.amountTolerance || 0.01
       const dateTolerance = params.dateTolerance || 2
 
-    const matchedPayouts: any[] = []
-    const unmatchedPayouts: any[] = []
+      const matchedPayouts: any[] = []
+      const unmatchedPayouts: any[] = []
+      const usedTransactionIndexes = new Set<number>()
 
-    payouts.forEach((payout: any) => {
-      const payoutAmount = payout.amount / 100 // Convert cents to dollars
-      const payoutDate = new Date(payout.created * 1000)
+      payouts.forEach((payout) => {
+        const payoutAmount = payout.amount / 100 // Convert cents to dollars
+        const payoutDate = new Date(payout.created * 1000)
 
-      // Find matching bank transaction
-      const match = bankTransactions.find((tx: any) => {
-        const txAmount = Math.abs(tx.amount)
-        const txDate = new Date(tx.date)
-        const daysDiff = Math.abs(
-          (txDate.getTime() - payoutDate.getTime()) / (1000 * 60 * 60 * 24)
-        )
+        // Find matching bank transaction
+        const matchIndex = bankTransactions.findIndex((tx, index) => {
+          if (usedTransactionIndexes.has(index)) return false
 
-        return Math.abs(txAmount - payoutAmount) <= amountTolerance && daysDiff <= dateTolerance
+          const rawAmount = Number(tx.amount)
+          if (!Number.isFinite(rawAmount)) return false
+          if (rawAmount > 0) return false // Plaid uses negative values for deposits
+
+          const txAmount = Math.abs(rawAmount)
+          const txDate = new Date(tx.date)
+          if (Number.isNaN(txDate.getTime())) return false
+
+          const daysDiff = Math.abs(
+            (txDate.getTime() - payoutDate.getTime()) / (1000 * 60 * 60 * 24)
+          )
+
+          return Math.abs(txAmount - payoutAmount) <= amountTolerance && daysDiff <= dateTolerance
+        })
+
+        if (matchIndex >= 0) {
+          const match = bankTransactions[matchIndex]
+          usedTransactionIndexes.add(matchIndex)
+
+          const matchDate = new Date(match.date)
+          const amountDifference = Math.abs(Math.abs(Number(match.amount)) - payoutAmount)
+          const dayDifference = Math.abs(
+            (matchDate.getTime() - payoutDate.getTime()) / (1000 * 60 * 60 * 24)
+          )
+          const confidence = amountDifference < 0.01 && dayDifference < 1 ? 0.95 : 0.85
+
+          matchedPayouts.push({
+            payout_id: payout.id,
+            payout_amount: payoutAmount,
+            payout_date: payoutDate.toISOString().split('T')[0],
+            payout_status: payout.status,
+            bank_transaction_id:
+              match.transaction_id || match.id || String(matchIndex),
+            bank_amount: match.amount,
+            bank_date: match.date,
+            bank_name: match.name,
+            confidence,
+            status: 'matched',
+          })
+        } else {
+          unmatchedPayouts.push({
+            payout_id: payout.id,
+            payout_amount: payoutAmount,
+            payout_date: payoutDate.toISOString().split('T')[0],
+            payout_status: payout.status,
+            arrival_date: payout.arrival_date
+              ? new Date(payout.arrival_date * 1000).toISOString().split('T')[0]
+              : null,
+            status: 'unmatched',
+            reason: 'No matching bank transaction found within tolerance',
+          })
+        }
       })
-
-      if (match) {
-        const confidence =
-          Math.abs(match.amount - payoutAmount) < 0.01 &&
-          Math.abs(
-            (new Date(match.date).getTime() - payoutDate.getTime()) / (1000 * 60 * 60 * 24)
-          ) < 1
-            ? 0.95
-            : 0.85
-
-        matchedPayouts.push({
-          payout_id: payout.id,
-          payout_amount: payoutAmount,
-          payout_date: payoutDate.toISOString().split('T')[0],
-          payout_status: payout.status,
-          bank_transaction_id: match.transaction_id,
-          bank_amount: match.amount,
-          bank_date: match.date,
-          bank_name: match.name,
-          confidence,
-          status: 'matched',
-        })
-      } else {
-        unmatchedPayouts.push({
-          payout_id: payout.id,
-          payout_amount: payoutAmount,
-          payout_date: payoutDate.toISOString().split('T')[0],
-          payout_status: payout.status,
-          arrival_date: payout.arrival_date
-            ? new Date(payout.arrival_date * 1000).toISOString().split('T')[0]
-            : null,
-          status: 'unmatched',
-          reason: 'No matching bank transaction found within tolerance',
-        })
-      }
-    })
 
       return {
         success: true,
         output: {
-        matched_payouts: matchedPayouts,
-        unmatched_payouts: unmatchedPayouts,
-        metadata: {
-          total_payouts: payouts.length,
-          matched_count: matchedPayouts.length,
-          unmatched_count: unmatchedPayouts.length,
-          match_rate: payouts.length > 0 ? matchedPayouts.length / payouts.length : 0,
-          date_range: {
-            start: params.startDate,
-            end: params.endDate,
+          matched_payouts: matchedPayouts,
+          unmatched_payouts: unmatchedPayouts,
+          metadata: {
+            total_payouts: payouts.length,
+            matched_count: matchedPayouts.length,
+            unmatched_count: unmatchedPayouts.length,
+            match_rate: payouts.length > 0 ? matchedPayouts.length / payouts.length : 0,
+            date_range: {
+              start: params.startDate,
+              end: params.endDate,
+            },
           },
         },
-      },
-    }
+      }
     } catch (error: any) {
       const errorDetails = error.response?.body
         ? JSON.stringify(error.response.body)

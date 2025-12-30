@@ -263,7 +263,7 @@ export function validateDate(
 
   return {
     valid: true,
-    sanitized: date,
+    sanitized: new Date(date).getTime(),
   }
 }
 

@@ -58,11 +58,11 @@ export const quickbooksListAccountsTool: ToolConfig<ListAccountsParams, ListAcco
 
       // Build and validate query with pagination
       const rawQuery =
-        params.query || buildDefaultQuery('Account', params.maxResults, params.startPosition)
+        params.query || buildDefaultQuery('Account', params.maxResults, 1)
 
       // Apply pagination to custom queries
       const queryWithPagination = params.query
-        ? addPaginationToQuery(rawQuery, params.maxResults, params.startPosition)
+        ? addPaginationToQuery(rawQuery, params.maxResults, 1)
         : rawQuery
 
       const query = validateQuickBooksQuery(queryWithPagination, 'Account')
@@ -81,7 +81,7 @@ export const quickbooksListAccountsTool: ToolConfig<ListAccountsParams, ListAcco
           metadata: {
             count: accounts.length,
             maxResults: params.maxResults || 100,
-            startPosition: params.startPosition || 1,
+            startPosition: 1,
           },
         },
       }

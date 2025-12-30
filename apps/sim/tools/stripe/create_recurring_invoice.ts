@@ -122,7 +122,7 @@ export const stripeCreateRecurringInvoiceTool: ToolConfig<
       const currency = params.currency || 'usd'
       const collectionMethod = params.autoAdvance === false ? 'send_invoice' : 'charge_automatically'
 
-      const subscription = await stripe.subscriptions.create({
+      const subscription: Stripe.Subscription = await stripe.subscriptions.create({
         customer: params.customer,
         collection_method: collectionMethod,
         days_until_due:
@@ -132,13 +132,15 @@ export const stripeCreateRecurringInvoiceTool: ToolConfig<
             price_data: {
               currency,
               recurring: {
-                interval,
+                interval: interval as Stripe.Price.Recurring.Interval,
                 interval_count: intervalCount,
               },
               unit_amount: amountCents,
               product_data: {
                 name: params.description || `Recurring ${interval} invoice`,
               },
+            } as Stripe.SubscriptionCreateParams.Item.PriceData & {
+              product_data: { name: string }
             },
           },
         ],
@@ -162,8 +164,9 @@ export const stripeCreateRecurringInvoiceTool: ToolConfig<
         ? new Date(latestInvoice.created * 1000).toISOString().split('T')[0]
         : new Date().toISOString().split('T')[0]
 
-      const nextInvoiceDate = subscription.current_period_end
-        ? new Date(subscription.current_period_end * 1000)
+      const currentPeriodEnd = (subscription as Stripe.Subscription & { current_period_end?: number }).current_period_end
+      const nextInvoiceDate = currentPeriodEnd
+        ? new Date(currentPeriodEnd * 1000)
         : (() => {
             const next = new Date()
             switch (interval) {

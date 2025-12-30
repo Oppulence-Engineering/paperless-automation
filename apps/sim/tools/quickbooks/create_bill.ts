@@ -1,7 +1,7 @@
 import QuickBooks from 'node-quickbooks'
 import type { CreateBillParams, BillResponse } from '@/tools/quickbooks/types'
 import type { ToolConfig } from '@/tools/types'
-import { validateDate } from '@/tools/financial-validation'
+import { validateDate, validateFinancialAmount } from '@/tools/financial-validation'
 import { createLogger } from '@sim/logger'
 
 const logger = createLogger('QuickBooksCreateBill')
